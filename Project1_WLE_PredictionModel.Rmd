@@ -1,0 +1,214 @@
+---
+title: "Weight Lifting Exercise Prediction Model"
+author: "C. Daniels"
+date: "January 31, 2016"
+course: "Practical Machine Learning"
+project: "Course Project"
+output:
+  html_document:
+  highlight: default
+  fig_caption: yes
+---
+#### Executive Summary
+In this project I analyzed measurements from belt, forearm, arm, and dumbbell accelerometers of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways (the Classe variable).  I built 3 different models to predict the Classe variable and found that the Random Forest model was the most accurate with 99.03% accuracy.  When this model was applied to the final test set, it correctly selected the Classe for all 20 inputs. The results indicate that the data collected can be used to accurately predict the the Classe variable. While the selected model works well, I think it could  be better. Additional data analysis and model fitting could be used to improve accuracy, reduce the number of predictors or reduce processing time.
+
+```{r, echo= FALSE, message=FALSE, warning=FALSE}
+# Pre-Processing and setup. 
+library(knitr)
+library(lmtest)
+library(caret)
+library(gbm)
+library(caret)
+library(AppliedPredictiveModeling)
+library(e1071)
+library(ElemStatLearn)
+```
+#### Question 
+
+Can we predict the Classe variable indicating how well an exercise was performed using data collected in the Qualitative Activity Recognition of Weight Lifting Exercises study?
+
+#### Background
+
+The data for this analysis came from the Qualitative Activity Recognition of Weight Lifting Exercises study in which measurements were taken to determine the quality of the exercise being done. In the study, Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway
+(Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. [1]
+
+#### Load Input Data 
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='hide'}
+TRAIN <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+TEST  <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+TRN  <- "pml-training1.csv"
+TST  <- "pml-testing1.csv"
+if (!file.exists(TRN)) {
+    download.file(TRAIN, TRN)
+}
+if (!file.exists(TST)) {
+    download.file(TEST, TST)
+}
+#read in both training test data 
+trnData <-read.csv(TRN, na.strings= "?", skip= 0, nrows= -1, sep=",")
+tstData <-read.csv(TST, na.strings= "?", skip= 0, nrows= -1, sep=",")
+```
+
+The raw training data contains `r ncol(trnData)` columns and `r nrow(trnData)` rows.  There are a lot of observations to work with (which is good), but the large number of columns may make it excessively time consuming to evaluate. The final test data is much smaller with smaller with `r ncol(tstData)` columns and `r nrow(tstData)` rows.
+Based on this information, I decided to examine the data further to see if it could be trimmed to a more manageable size.
+
+#### Exploratory Data Analysis and Feature Selection
+When I started to examine the data, the first thing I noticed was that there were a large number of columns that were completely null(NA) or sparsely populated so I removed them. I also eliminated the time stamp and window columns because they were repetitive. The other columns contained what appeared to be valid data so I decided to use them as is without applying any other transformations. In addition, I decided not to automate this process and just made a list of the remaining columns thinking that I could examine and filter the list further if necessary. After removing the aforementioned columns, I was left with data that contained 13 metrics for each of the 4 measurement devices (Belt, Arm, Dumbbell and Forearm). Then I used the nearZeroVar function in R to confirm that the remaining variables had sufficient variability to warrant inclusion.
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+colList = c("classe", "user_name", 
+            "roll_belt", "pitch_belt", "yaw_belt",            ##belt
+            "total_accel_belt",
+            "gyros_belt_x", "gyros_belt_y", "gyros_belt_z",
+            "accel_belt_x", "accel_belt_y", "accel_belt_z",
+            "magnet_belt_x", "magnet_belt_y", "magnet_belt_z",
+            "roll_arm", "pitch_arm", "yaw_arm",               ## arm
+            "total_accel_arm",
+            "gyros_arm_x", "gyros_arm_y", "gyros_arm_z",
+            "accel_arm_x", "accel_arm_y", "accel_arm_z",
+            "magnet_arm_x", "magnet_arm_y", "magnet_arm_z",
+            "roll_dumbbell", "pitch_dumbbell", "yaw_dumbbell", ## db
+            "total_accel_dumbbell",
+            "gyros_dumbbell_x", "gyros_dumbbell_y", "gyros_dumbbell_z",
+            "accel_dumbbell_x", "accel_dumbbell_y", "accel_dumbbell_z",
+            "magnet_dumbbell_x", "magnet_dumbbell_y", "magnet_dumbbell_z",
+            "roll_forearm", "pitch_forearm", "yaw_forearm",   ##forearm
+            "total_accel_forearm",
+            "gyros_forearm_x", "gyros_forearm_y",  "gyros_forearm_z",
+            "accel_forearm_x", "accel_forearm_y", "accel_forearm_z",
+            "magnet_forearm_x", "magnet_forearm_y", "magnet_forearm_z")
+
+#select columns for training
+trn <- (trnData[colList])
+nsv <- nearZeroVar(trn, saveMetrics = TRUE)
+```
+At this point, I have cleaned the data and paired it down to `r ncol(trn)` columns and `r nrow(trn)` rows to use in the next phase of the analysis. A formatted list of features variables can be found in Appendix A.
+
+In addition, I cleaned the test data using the same list of columns (except for the Classe). This file (tst) will not be used again until it is used to predict the Classe variable using the best model.
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='show'}
+
+#select columns for test data - Same as training data columns
+#except for classe. (classe is not in the test data - because it's what we want to predict)
+colList2 <- colList[c(2:54)]
+tst <- (tstData[colList2])
+```
+
+
+#### Data Splitting
+Next I split the training data into a training and test data set. I elected to keep things simple and split the data into two groups: 60% training (trnG1) and 40% test (trnG2). 
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='show'}
+set.seed(4355) #Set a seed for reproducibility 
+#subset trn into 2 groups: trnG1 and trnG2
+trnIdx <- createDataPartition(trn$classe, p = .6, list=FALSE)
+trnG1 = trn[trnIdx,]
+trnG2 = trn[-trnIdx,]
+```
+
+
+#### Train Models 
+Next I built Random Forest (RF), Boosted Tree (GBM), and a Linear Discriminant Analysis (LDA) models using the training portion of the training data (trnG1) and applied them to the testing portion of the training data (trnG2). Cross Validation was performed within the R train function using the "cv" method with 3 resampling iterations.  
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+#Configure parallel processing using method suggested by L. Greski [2]
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) #leave 1 core for OS
+registerDoParallel(cluster)
+set.seed(123)
+sds <- vector(mode = "list", length = 4) 
+for(i in 1:3) sds[[i]]<- sample.int(n=1000, 3) 
+sds[[4]]<-sample.int(1000, 1)
+
+#Configure trainControl object - settings for cross validation
+trnControl <- trainControl(method = "cv", number = 3, allowParallel = TRUE, seeds=sds)
+
+#Model Building
+
+## Random Forest
+startRF <- Sys.time() 
+modelRF <- train(classe ~., method="rf",  data=trnG1, prox=TRUE, trControl = trnControl) 
+predRF <- predict(modelRF, trnG2)
+durRF <- format(difftime(Sys.time(), startRF, units = "mins"))
+
+##Boosted trees
+startGBM <- Sys.time()
+modelGBM <- train(classe ~., method="gbm",  data=trnG1, trControl = trnControl)  
+predGBM <- predict(modelGBM, trnG2)
+durGBM <- format(difftime(Sys.time(), startGBM, units = "mins"))
+
+##Linear Discriminant Analysis
+startLDA <- Sys.time()
+modelLDA <- train(classe ~., method="lda",  data=trnG1, trControl = trnControl)   
+predLDA <- predict(modelLDA, trnG2)
+durLDA <- format(difftime(Sys.time(), startLDA, units = "mins"))
+
+#De-register parallel processing cluster
+stopCluster(cluster)
+### All models built
+
+#Create a dataframe of our durations 
+dfDUR<- data.frame(durRF, durGBM, durLDA)
+
+```
+
+#### Model Selection and Out of Sample Error Calculation
+
+Then I evaluated the models created in the previous step. I chose the best model based on accuracy and predicted the out of sample error on the selected model.
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='show'}
+accRF <- (confusionMatrix(predRF, trnG2$classe)$overall[1])
+accGBM <- (confusionMatrix(predGBM, trnG2$classe)$overall[1]) 
+accLDA <- (confusionMatrix(predLDA, trnG2$classe)$overall[1])  
+dfACC <- data.frame(accRF, accGBM, accLDA)
+dfResults <- data.frame(
+    "Model Name" = c("RF", "GBM", "LDA"),
+    "Duration" = c(durRF, durGBM, durLDA),
+    "Accuracy" = c(accRF, accGBM, accLDA))
+
+knitr::kable(dfResults[1:3], row.names = FALSE, caption="Model Evaluation Table")
+```
+
+Based on the results shown in that table above, I selected the Random Forest Model to apply to the test data. This model had the best accuracy, but it also required the most time to generate process.  The confusion matrix for the selected Model (Random Forest) is shown below:
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='show'}
+confusionMatrix(trnG2$classe, predRF)
+outofSampleErrror <-  (1 - accRF) * 100 
+```
+
+Using the accuracy results from the confusion matrix on the test portion of the training data (trnG2), I expect the out of sample error rate to be `r  outofSampleErrror` %.
+
+
+#### Apply Selected Model to Test Data
+I applied the Random Forest model on the test data to obtain final predictions and save the predictions to an output file.
+
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='show'}
+predTst <- predict(modelRF, tst)
+print(predTst)
+# Write CSV in R
+write.csv(predTst, file = "Project1.csv",row.names=FALSE)
+```
+
+#### Final Model Results
+The results obtained were submitted to Coursera where 20 out of 20 were predicted correctly.
+
+\newpage
+
+### References 
+[1]  Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+[2] L. Greski Improving Performance of Random Forest in caret::train() https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md
+
+### Appendix
+Fields from `r TRN` used for Model Building
+```{r, echo= TRUE, message=FALSE, warning=FALSE, results='asis'}
+#output names of fields for documentation 
+#cat(names(trn),sep="\n")
+m <- as.data.frame(names(trn))
+knitr::kable(m[1:1],row.names = FALSE, caption="Feature Table", align="l")
+
+```
